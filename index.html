@@ -8,6 +8,7 @@
 <meta name="apple-mobile-web-app-title" content="Produktywność">
 <link rel="manifest" href="manifest.json">
 <title>Produktywność</title>
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2/dist/umd/supabase.min.js"></script>
 <link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,300;0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=DM+Serif+Display&display=swap" rel="stylesheet">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
@@ -592,6 +593,21 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
           <button class="btn" style="margin-top:10px;width:100%" onclick="addTemplateTask()">+ dodaj regularne zadanie</button>
         </div>
 
+        <!-- Sync -->
+        <div class="card">
+          <div class="admin-title">Synchronizacja</div>
+          <div style="font-size:12px;color:var(--muted);margin-bottom:12px;line-height:1.5">Ustaw ten sam kod na każdym urządzeniu żeby synchronizować dane między komputerem a telefonem.</div>
+          <div class="admin-row">
+            <label class="admin-label">Kod synchronizacji</label>
+            <input class="admin-input" id="adminSyncCode" type="text" maxlength="20" placeholder="np. KACPER123" style="text-transform:uppercase;letter-spacing:0.05em">
+          </div>
+          <div style="display:flex;gap:8px;margin-top:4px">
+            <button class="btn btn-primary" style="flex:1" onclick="saveSyncCode()">Zapisz kod</button>
+            <button class="btn" onclick="syncNow()">Sync teraz</button>
+          </div>
+          <div style="font-size:11px;color:var(--muted);margin-top:8px" id="syncStatus"></div>
+        </div>
+
         <!-- Data -->
         <div class="card">
           <div class="admin-title">Dane</div>
@@ -670,6 +686,75 @@ html,body{height:100%;background:var(--bg);color:var(--text);font-family:'DM San
 </div><!-- /shell -->
 
 <script>
+// ─── SUPABASE CONFIG ─────────────────────────────────────────────────────────
+// Wklej tutaj swoje dane z Supabase → Project Settings → API
+const SUPABASE_URL = 'PASTE_YOUR_PROJECT_URL_HERE';
+const SUPABASE_KEY = 'PASTE_YOUR_ANON_KEY_HERE';
+
+const SYNC_CODE_KEY = 'prodapp_sync_code';
+let _supabase = null;
+function getSupabase() {
+  if (!_supabase && SUPABASE_URL !== 'PASTE_YOUR_PROJECT_URL_HERE') {
+    _supabase = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+  }
+  return _supabase;
+}
+
+function getSyncCode() { return localStorage.getItem(SYNC_CODE_KEY) || ''; }
+
+let _syncTimer = null;
+function scheduleSyncPush() {
+  clearTimeout(_syncTimer);
+  _syncTimer = setTimeout(syncPush, 2000);
+}
+
+async function syncPush() {
+  const sb = getSupabase(); const code = getSyncCode();
+  if (!sb || !code) return;
+  try {
+    await sb.from('sync').upsert({ code, data: D, updated_at: new Date().toISOString() });
+    const el = document.getElementById('syncStatus');
+    if (el) el.textContent = 'Zsynchronizowano: ' + new Date().toLocaleTimeString('pl-PL', {hour:'2-digit',minute:'2-digit'});
+  } catch(e) { console.warn('Sync push failed', e); }
+}
+
+async function syncPull() {
+  const sb = getSupabase(); const code = getSyncCode();
+  if (!sb || !code) return;
+  try {
+    const { data, error } = await sb.from('sync').select('data').eq('code', code).single();
+    if (!error && data?.data) {
+      const remote = data.data;
+      D = JSON.parse(JSON.stringify(defaultData));
+      mergeInto(D, remote);
+      localStorage.setItem(KEY, JSON.stringify(D));
+      const el = document.getElementById('syncStatus');
+      if (el) el.textContent = 'Pobrano dane z chmury';
+    }
+  } catch(e) { console.warn('Sync pull failed', e); }
+}
+
+async function syncNow() {
+  const sb = getSupabase(); const code = getSyncCode();
+  if (!sb) { showNotif('Uzupełnij dane Supabase w kodzie aplikacji'); return; }
+  if (!code) { showNotif('Ustaw kod synchronizacji poniżej'); return; }
+  const el = document.getElementById('syncStatus');
+  if (el) el.textContent = 'Synchronizuję...';
+  await syncPush();
+  showNotif('Dane zsynchronizowane');
+}
+
+async function saveSyncCode() {
+  const val = document.getElementById('adminSyncCode').value.trim().toUpperCase();
+  if (!val) { showNotif('Wpisz kod synchronizacji'); return; }
+  localStorage.setItem(SYNC_CODE_KEY, val);
+  const el = document.getElementById('syncStatus');
+  if (el) el.textContent = 'Kod ustawiony — pobieranie danych...';
+  await syncPull();
+  renderDashboard();
+  showNotif('Kod ustawiony: ' + val);
+}
+
 // ─── DATA ────────────────────────────────────────────────────────────────────
 const KEY = 'prodapp_data';
 const defaultData = {
@@ -724,7 +809,7 @@ function mergeInto(target, source) {
     }
   }
 }
-function save() { localStorage.setItem(KEY, JSON.stringify(D)); }
+function save() { localStorage.setItem(KEY, JSON.stringify(D)); scheduleSyncPush(); }
 function uid() { return Date.now().toString(36) + Math.random().toString(36).slice(2,7); }
 
 // ─── DATES ───────────────────────────────────────────────────────────────────
@@ -1442,6 +1527,9 @@ function renderAdmin(){
   document.getElementById('adminPomoWork').value=D.pomodoroSettings.work;
   document.getElementById('adminPomoBreak').value=D.pomodoroSettings.break;
   document.getElementById('adminTargetHours').value=(D.workSchedule||{}).targetHours||3;
+  document.getElementById('adminSyncCode').value=getSyncCode();
+  const syncEl=document.getElementById('syncStatus');
+  if(syncEl) syncEl.textContent=getSyncCode()?'Kod aktywny: '+getSyncCode():'Brak kodu — dane nie są synchronizowane';
   buildAdminCats(); buildDayTabs(); buildTemplateContent();
 }
 function saveAdminName(){ D.profile.name=document.getElementById('adminName').value; document.getElementById('adminAvatar').textContent=(D.profile.name||'K')[0].toUpperCase(); save(); }
@@ -1494,6 +1582,9 @@ recalcStreak();
 initPomodoro();
 if(getWorkState()==='working') startWsTick();
 renderDashboard();
+
+// pull from Supabase on start, then re-render
+syncPull().then(()=>{ autoPopulateToday(); recalcStreak(); renderDashboard(); });
 
 if('serviceWorker' in navigator) window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
 
